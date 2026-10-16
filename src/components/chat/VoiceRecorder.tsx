@@ -1,18 +1,17 @@
 "use client";
 
 import { useState, useRef } from "react";
-import { Mic, Loader2, Send, AlertCircle } from "lucide-react";
+import { Mic, Send, AlertCircle } from "lucide-react";
 import { VoiceRecorderManager } from "@/lib/audioRecorder";
 
 interface VoiceRecorderProps {
-  onSendVoiceNote: (audioUrl: string, durationSec: number) => Promise<void>;
+  onRecorded: (blob: Blob, durationSec: number) => void;
 }
 
-export function VoiceRecorder({ onSendVoiceNote }: VoiceRecorderProps) {
+export function VoiceRecorder({ onRecorded }: VoiceRecorderProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0);
-  const [uploading, setUploading] = useState(false);
 
   const managerRef = useRef<VoiceRecorderManager | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -50,38 +49,22 @@ export function VoiceRecorder({ onSendVoiceNote }: VoiceRecorderProps) {
 
     if (timerRef.current) clearInterval(timerRef.current);
     setIsRecording(false);
-    setUploading(true);
 
     try {
       // stop() is async – waits for final MediaRecorder 'stop' event with all chunks
       const { blob, duration: finalDuration } = await manager.stop();
 
-      // Derive extension from the actual blob MIME type
-      const ext = blob.type.includes("ogg")
-        ? ".ogg"
-        : blob.type.includes("mp4")
-        ? ".m4a"
-        : ".webm";
+      setDuration(0);
+      setVolume(0);
+      managerRef.current = null;
 
-      const formData = new FormData();
-      formData.append("file", blob, `voice-note-${Date.now()}${ext}`);
-      formData.append("bucket", "voice-notes");
-
-      const uploadRes = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
-
-      if (uploadRes.ok) {
-        const { url } = await uploadRes.json();
-        await onSendVoiceNote(url, finalDuration);
-      } else {
-        console.error("Upload failed");
+      // Hand the blob to the parent so it can render optimistically and upload
+      // in the background.
+      if (blob.size > 0) {
+        onRecorded(blob, finalDuration);
       }
     } catch (err) {
       console.error("Failed to process voice note:", err);
-    } finally {
-      setUploading(false);
       setDuration(0);
       setVolume(0);
       managerRef.current = null;
@@ -104,15 +87,6 @@ export function VoiceRecorder({ onSendVoiceNote }: VoiceRecorderProps) {
     const s = sec % 60;
     return `${mins}:${s < 10 ? "0" : ""}${s}`;
   };
-
-  if (uploading) {
-    return (
-      <div className="flex items-center gap-2 text-xs text-[#FF8965] px-3 py-2 bg-[#19162B] rounded-2xl border border-[#322B54]">
-        <Loader2 className="w-4 h-4 animate-spin" />
-        <span>Sending voice note...</span>
-      </div>
-    );
-  }
 
   if (isRecording) {
     return (

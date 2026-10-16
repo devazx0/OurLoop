@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { LogOut, Copy, Check, HeartHandshake, Bell } from "lucide-react";
+import Link from "next/link";
+import { LogOut, Copy, Check, HeartHandshake, Bell, Settings } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { NotificationSettingsModal } from "../pwa/NotificationSettingsModal";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -78,6 +79,15 @@ export function HeaderBar({ user, partner, inviteCode }: HeaderBarProps) {
           <Bell className="w-4.5 h-4.5 text-[#E26D54]" />
         </button>
 
+        <Link
+          href="/settings"
+          className="p-2 rounded-xl text-[#9992A8] hover:text-[#F6F3EE] hover:bg-[#201D2B] transition-colors"
+          title="Settings"
+          aria-label="Settings"
+        >
+          <Settings className="w-5 h-5 text-[#E5B268]" />
+        </Link>
+
         <button
           onClick={() => setMenuOpen(!menuOpen)}
           className="p-2 rounded-xl text-[#9992A8] hover:text-[#F6F3EE] hover:bg-[#201D2B] transition-colors"
@@ -100,6 +110,15 @@ export function HeaderBar({ user, partner, inviteCode }: HeaderBarProps) {
                 <Bell className="w-4 h-4 text-[#E26D54]" />
                 <span>Push Notifications</span>
               </button>
+
+              <Link
+                href="/settings"
+                onClick={() => setMenuOpen(false)}
+                className="w-full text-left px-3 py-2.5 rounded-xl hover:bg-[#221F2D] flex items-center gap-2 text-[#F6F3EE] transition-colors"
+              >
+                <Settings className="w-4 h-4 text-[#E5B268]" />
+                <span>Settings</span>
+              </Link>
 
               {inviteCode && (
                 <button

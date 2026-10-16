@@ -20,6 +20,7 @@ export async function GET() {
       nickname: user.nickname,
       avatarUrl: user.avatarUrl,
       coupleId: user.coupleId,
+      emailNotificationsEnabled: user.emailNotificationsEnabled,
       couple: user.couple,
       partner: user.partner,
     },

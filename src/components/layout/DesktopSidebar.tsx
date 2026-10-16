@@ -13,6 +13,7 @@ import {
   Copy,
   Check,
   Bell,
+  Settings,
 } from "lucide-react";
 import { NotificationSettingsModal } from "../pwa/NotificationSettingsModal";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -74,6 +75,7 @@ export function DesktopSidebar({ user, partner, inviteCode }: DesktopSidebarProp
     { name: "Games", href: "/games", icon: Gamepad2 },
     { name: "Diary", href: "/diary", icon: BookOpen },
     { name: "Chat", href: "/chat", icon: MessageCircle, badge: unreadCount },
+    { name: "Settings", href: "/settings", icon: Settings },
   ];
 
   return (

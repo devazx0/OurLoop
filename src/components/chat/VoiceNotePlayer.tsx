@@ -1,19 +1,36 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { Play, Pause } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { Play, Pause, Loader2, AlertCircle } from "lucide-react";
 
 interface VoiceNotePlayerProps {
   audioUrl: string;
   durationSec?: number | null;
   isSentByMe: boolean;
+  onError?: (message: string) => void;
 }
 
-export function VoiceNotePlayer({ audioUrl, durationSec, isSentByMe }: VoiceNotePlayerProps) {
+export function VoiceNotePlayer({
+  audioUrl,
+  durationSec,
+  isSentByMe,
+  onError,
+}: VoiceNotePlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [hasError, setHasError] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState<number>(durationSec || 0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+
+  const describeError = useCallback(() => {
+    const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+    return offline
+      ? "Voice note couldn't play — you appear to be offline."
+      : "Couldn't play this voice note. Check your connection and tap to retry.";
+  }, []);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -40,6 +57,26 @@ export function VoiceNotePlayer({ audioUrl, durationSec, isSentByMe }: VoiceNote
 
     const handlePlay = () => {
       setIsPlaying(true);
+      setIsLoading(false);
+    };
+
+    const handleWaiting = () => {
+      setIsLoading(true);
+    };
+
+    const handleCanPlay = () => {
+      setIsLoading(false);
+    };
+
+    const handleStalled = () => {
+      setIsLoading(true);
+    };
+
+    const handleError = () => {
+      setIsLoading(false);
+      setIsPlaying(false);
+      setHasError(true);
+      onErrorRef.current?.(describeError());
     };
 
     audio.addEventListener("loadedmetadata", handleLoadedMetadata);
@@ -47,6 +84,10 @@ export function VoiceNotePlayer({ audioUrl, durationSec, isSentByMe }: VoiceNote
     audio.addEventListener("ended", handleEnded);
     audio.addEventListener("pause", handlePause);
     audio.addEventListener("play", handlePlay);
+    audio.addEventListener("waiting", handleWaiting);
+    audio.addEventListener("stalled", handleStalled);
+    audio.addEventListener("canplay", handleCanPlay);
+    audio.addEventListener("error", handleError);
 
     return () => {
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
@@ -54,38 +95,68 @@ export function VoiceNotePlayer({ audioUrl, durationSec, isSentByMe }: VoiceNote
       audio.removeEventListener("ended", handleEnded);
       audio.removeEventListener("pause", handlePause);
       audio.removeEventListener("play", handlePlay);
+      audio.removeEventListener("waiting", handleWaiting);
+      audio.removeEventListener("stalled", handleStalled);
+      audio.removeEventListener("canplay", handleCanPlay);
+      audio.removeEventListener("error", handleError);
     };
-  }, []);
+  }, [describeError]);
+
+  // Reset transient state if the source URL changes (e.g. local preview -> hosted URL)
+  useEffect(() => {
+    setHasError(false);
+    setIsLoading(false);
+    setIsPlaying(false);
+    setCurrentTime(0);
+  }, [audioUrl]);
 
   async function togglePlay() {
     const audio = audioRef.current;
     if (!audio) return;
 
+    // Retry after an error: force the browser to re-fetch the source
+    if (hasError) {
+      setHasError(false);
+      try {
+        audio.load();
+      } catch {
+        // ignore – play() below will surface any real failure
+      }
+    }
+
     if (isPlaying) {
       audio.pause();
-    } else {
-      try {
-        if (audio.ended || audio.currentTime >= (audio.duration || audioDuration || 1) - 0.1) {
-          audio.currentTime = 0;
-        }
-        await audio.play();
-      } catch (err) {
-        console.error("Audio play error:", err);
-        setIsPlaying(false);
+      return;
+    }
+
+    try {
+      setIsLoading(true);
+      if (audio.ended || audio.currentTime >= (audio.duration || audioDuration || 1) - 0.1) {
+        audio.currentTime = 0;
       }
+      await audio.play();
+    } catch (err) {
+      console.error("Audio play error:", err);
+      setIsPlaying(false);
+      setIsLoading(false);
+      setHasError(true);
+      onErrorRef.current?.(describeError());
     }
   }
 
   function handleSeek(index: number, totalBars: number) {
     const audio = audioRef.current;
-    if (!audio) return;
+    if (!audio || hasError) return;
 
     const effectiveDuration = audio.duration || audioDuration || 1;
     const targetTime = (index / totalBars) * effectiveDuration;
     audio.currentTime = targetTime;
     setCurrentTime(targetTime);
     if (!isPlaying) {
-      audio.play().catch(() => {});
+      setIsLoading(true);
+      audio.play().catch(() => {
+        setIsLoading(false);
+      });
     }
   }
 
@@ -108,11 +179,18 @@ export function VoiceNotePlayer({ audioUrl, durationSec, isSentByMe }: VoiceNote
       <button
         type="button"
         onClick={togglePlay}
+        aria-label={hasError ? "Retry voice note" : isPlaying ? "Pause voice note" : "Play voice note"}
         className={`w-8 h-8 rounded-full flex items-center justify-center transition-transform hover:scale-105 active:scale-95 shrink-0 ${
-          isSentByMe ? "bg-white/20 text-white hover:bg-white/30" : "bg-[#FF8965] text-[#211E36] hover:bg-[#F2734C]"
-        }`}
+          isSentByMe
+            ? "bg-white/20 text-white hover:bg-white/30"
+            : "bg-[#FF8965] text-[#211E36] hover:bg-[#F2734C]"
+        } ${hasError ? "ring-1 ring-amber-300/60" : ""}`}
       >
-        {isPlaying ? (
+        {isLoading ? (
+          <Loader2 className="w-4 h-4 animate-spin" />
+        ) : hasError ? (
+          <AlertCircle className="w-4 h-4" />
+        ) : isPlaying ? (
           <Pause className="w-4 h-4 fill-current" />
         ) : (
           <Play className="w-4 h-4 fill-current ml-0.5" />
@@ -145,7 +223,15 @@ export function VoiceNotePlayer({ audioUrl, durationSec, isSentByMe }: VoiceNote
         </div>
 
         <div className="flex items-center justify-between text-[9px] opacity-75">
-          <span>{isPlaying ? formatSec(currentTime) : "Voice Note"}</span>
+          {hasError ? (
+            <span className={isSentByMe ? "text-white/90" : "text-amber-300"}>
+              Couldn&apos;t play · Tap to retry
+            </span>
+          ) : isLoading ? (
+            <span>{isPlaying ? formatSec(currentTime) : "Loading…"}</span>
+          ) : (
+            <span>{isPlaying ? formatSec(currentTime) : "Voice Note"}</span>
+          )}
           <span>{formatSec(effectiveDur)}</span>
         </div>
       </div>
