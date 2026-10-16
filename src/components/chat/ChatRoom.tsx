@@ -13,6 +13,9 @@ import {
   X,
   ChevronDown,
   Trash2,
+  AlertCircle,
+  Loader2,
+  Info,
 } from "lucide-react";
 import { format } from "date-fns";
 import { VoiceRecorder } from "./VoiceRecorder";
@@ -47,7 +50,31 @@ export interface ChatMessageItem {
     emoji: string;
     userId: string;
   }>;
+  /** Client-only: delivery state for optimistically rendered messages. */
+  localStatus?: "sending" | "sent" | "failed";
+  /** Client-only: blob URL used while a media/voice message is still uploading. */
+  localPreviewUrl?: string;
 }
+
+type ToastVariant = "error" | "info" | "success";
+
+interface ChatToast {
+  id: string;
+  message: string;
+  variant: ToastVariant;
+}
+
+type PendingPayload =
+  | { kind: "text"; text: string; replyToId?: string | null }
+  | {
+      kind: "media";
+      source: File | Blob;
+      fileName: string;
+      contentType: "IMAGE" | "VIDEO" | "VOICE_NOTE";
+      durationSec?: number;
+      replyToId?: string | null;
+      previewUrl: string;
+    };
 
 interface ChatRoomProps {
   initialMessages: ChatMessageItem[];
@@ -64,9 +91,36 @@ function areMessagesDifferent(prev: ChatMessageItem[], next: ChatMessageItem[]):
   for (let i = 0; i < prev.length; i++) {
     if (prev[i].id !== next[i].id) return true;
     if (prev[i].readAt !== next[i].readAt) return true;
+    if (prev[i].localStatus !== next[i].localStatus) return true;
     if ((prev[i].reactions?.length || 0) !== (next[i].reactions?.length || 0)) return true;
   }
   return false;
+}
+
+/**
+ * Swap an optimistic (local) message for its server counterpart without
+ * disturbing layout order. If a poll already pulled the server message in,
+ * the local copy is simply dropped to avoid a duplicate.
+ */
+function replaceLocalMessage(
+  messages: ChatMessageItem[],
+  localId: string,
+  serverMessage: ChatMessageItem
+): ChatMessageItem[] {
+  const alreadyPresent = messages.some((m) => m.id === serverMessage.id);
+  const result: ChatMessageItem[] = [];
+  for (const m of messages) {
+    if (m.id === localId) {
+      if (!alreadyPresent) result.push({ ...serverMessage, localStatus: "sent" });
+      continue;
+    }
+    result.push(m);
+  }
+  return result;
+}
+
+function createLocalId(): string {
+  return `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRoomProps) {
@@ -84,6 +138,7 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
   const [showScrollBottomBtn, setShowScrollBottomBtn] = useState(false);
   const [hasUnseenNewMessage, setHasUnseenNewMessage] = useState(false);
   const [isPartnerTyping, setIsPartnerTyping] = useState(false);
+  const [toasts, setToasts] = useState<ChatToast[]>([]);
 
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -93,6 +148,57 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
   const isInitialScrollDone = useRef(false);
   const lastTypingSentRef = useRef<number>(0);
   const partnerTypingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingPayloadsRef = useRef<Map<string, PendingPayload>>(new Map());
+  const objectUrlsRef = useRef<Set<string>>(new Set());
+
+  const showToast = useCallback((message: string, variant: ToastVariant = "error") => {
+    const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    setToasts((prev) => [...prev, { id, message, variant }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4200);
+  }, []);
+
+  // Release any blob URLs still held by optimistic messages on unmount.
+  useEffect(() => {
+    const urls = objectUrlsRef.current;
+    return () => {
+      urls.forEach((url) => URL.revokeObjectURL(url));
+      urls.clear();
+    };
+  }, []);
+
+  const revokePreview = useCallback((url?: string | null) => {
+    if (!url) return;
+    URL.revokeObjectURL(url);
+    objectUrlsRef.current.delete(url);
+  }, []);
+
+  const buildReplyPreview = useCallback(
+    (snapshot: ChatMessageItem | null): ChatMessageItem["replyTo"] => {
+      if (!snapshot) return null;
+      return {
+        id: snapshot.id,
+        text: snapshot.text,
+        contentType: snapshot.contentType,
+        senderName:
+          snapshot.senderId === currentUserId
+            ? "You"
+            : snapshot.sender.nickname || snapshot.sender.displayName || partnerName,
+      };
+    },
+    [currentUserId, partnerName]
+  );
+
+  const markLocalFailed = useCallback(
+    (localId: string, message: string) => {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === localId ? { ...m, localStatus: "failed" } : m))
+      );
+      showToast(message, "error");
+    },
+    [showToast]
+  );
 
   const sendTypingHeartbeat = useCallback((isTyping: boolean) => {
     const now = Date.now();
@@ -212,13 +318,24 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
           }
 
           setMessages((prev) => {
-            if (!areMessagesDifferent(prev, incoming)) {
+            // Keep optimistic messages the server doesn't know about yet so
+            // they don't flash away every poll while sending/retrying.
+            const serverIds = new Set(incoming.map((m) => m.id));
+            const preservedLocal = prev.filter(
+              (m) =>
+                (m.localStatus === "sending" || m.localStatus === "failed") &&
+                !serverIds.has(m.id)
+            );
+            const merged =
+              preservedLocal.length > 0 ? [...incoming, ...preservedLocal] : incoming;
+
+            if (!areMessagesDifferent(prev, merged)) {
               return prev;
             }
 
             const hadNewIncoming =
-              incoming.length > prev.length &&
-              incoming[incoming.length - 1]?.senderId !== currentUserId;
+              merged.length > prev.length &&
+              merged[merged.length - 1]?.senderId !== currentUserId;
 
             if (isAtBottomRef.current) {
               setTimeout(() => scrollToBottom("smooth"), 50);
@@ -226,7 +343,7 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
               setHasUnseenNewMessage(true);
             }
 
-            return incoming;
+            return merged;
           });
         }
       } catch (err) {}
@@ -258,6 +375,28 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
     }, 50);
   };
 
+  async function postTextMessage(localId: string, textValue: string, replyToId?: string | null) {
+    try {
+      const res = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contentType: "TEXT",
+          text: textValue,
+          replyToId: replyToId || undefined,
+        }),
+      });
+
+      if (!res.ok) throw new Error("Failed to send message");
+      const { message } = await res.json();
+      setMessages((prev) => replaceLocalMessage(prev, localId, message));
+      pendingPayloadsRef.current.delete(localId);
+    } catch (err) {
+      console.error("Send text error:", err);
+      markLocalFailed(localId, "Couldn't send your message. Tap to retry.");
+    }
+  }
+
   async function handleSendText(e: React.FormEvent) {
     e.preventDefault();
     if (!text.trim()) return;
@@ -270,122 +409,171 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
     setText("");
     setReplyingTo(null);
 
-    // Optimistic message
-    const tempId = `temp-${Date.now()}`;
+    // Optimistic message – rendered immediately, confirmed in the background
+    const localId = createLocalId();
     const optimisticMsg: ChatMessageItem = {
-      id: tempId,
+      id: localId,
       senderId: currentUserId,
       contentType: "TEXT",
       text: currentText,
       replyToId: replyingToSnapshot?.id || null,
-      replyTo: replyingToSnapshot
-        ? {
-            id: replyingToSnapshot.id,
-            text: replyingToSnapshot.text,
-            contentType: replyingToSnapshot.contentType,
-            senderName:
-              replyingToSnapshot.senderId === currentUserId
-                ? "You"
-                : replyingToSnapshot.sender.nickname ||
-                  replyingToSnapshot.sender.displayName ||
-                  partnerName,
-          }
-        : null,
+      replyTo: buildReplyPreview(replyingToSnapshot),
       createdAt: new Date(),
       sender: { id: currentUserId, displayName: "You" },
       reactions: [],
+      localStatus: "sending",
     };
     setMessages((prev) => [...prev, optimisticMsg]);
     setTimeout(() => scrollToBottom("smooth"), 50);
 
-    try {
-      const res = await fetch("/api/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contentType: "TEXT",
-          text: currentText,
-          replyToId: replyingToSnapshot?.id,
-        }),
-      });
+    pendingPayloadsRef.current.set(localId, {
+      kind: "text",
+      text: currentText,
+      replyToId: replyingToSnapshot?.id || null,
+    });
 
-      if (res.ok) {
-        const { message } = await res.json();
-        setMessages((prev) => prev.map((m) => (m.id === tempId ? message : m)));
-      }
-    } catch (err) {
-      console.error(err);
-    }
+    await postTextMessage(localId, currentText, replyingToSnapshot?.id || null);
   }
 
-  async function handleSendVoiceNote(audioUrl: string, durationSec: number) {
-    const replyingToSnapshot = replyingTo;
-    setReplyingTo(null);
-
+  async function uploadAndPostMedia(
+    localId: string,
+    payload: Extract<PendingPayload, { kind: "media" }>
+  ) {
     try {
-      const res = await fetch("/api/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contentType: "VOICE_NOTE",
-          contentUrl: audioUrl,
-          durationSec,
-          replyToId: replyingToSnapshot?.id,
-        }),
-      });
+      const formData = new FormData();
+      formData.append("file", payload.source, payload.fileName);
+      formData.append(
+        "bucket",
+        payload.contentType === "VOICE_NOTE" ? "voice-notes" : "memories"
+      );
 
-      if (res.ok) {
-        const { message } = await res.json();
-        setMessages((prev) => [...prev, message]);
-        setTimeout(() => scrollToBottom("smooth"), 50);
-      }
-    } catch (err) {
-      console.error(err);
-    }
-  }
-
-  async function uploadMediaFile(file: File) {
-    const replyingToSnapshot = replyingTo;
-    setReplyingTo(null);
-
-    const isVid = file.type.startsWith("video/");
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("bucket", "memories");
-
-    try {
       const uploadRes = await fetch("/api/upload", {
         method: "POST",
         body: formData,
       });
+      if (!uploadRes.ok) throw new Error("Upload failed");
+      const { url } = await uploadRes.json();
 
-      if (uploadRes.ok) {
-        const { url } = await uploadRes.json();
-        const res = await fetch("/api/messages", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contentType: isVid ? "VIDEO" : "IMAGE",
-            contentUrl: url,
-            replyToId: replyingToSnapshot?.id,
-          }),
-        });
+      const res = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contentType: payload.contentType,
+          contentUrl: url,
+          durationSec: payload.durationSec,
+          replyToId: payload.replyToId || undefined,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to send message");
+      const { message } = await res.json();
 
-        if (res.ok) {
-          const { message } = await res.json();
-          setMessages((prev) => [...prev, message]);
-          setTimeout(() => scrollToBottom("smooth"), 50);
-        }
-      }
+      setMessages((prev) => replaceLocalMessage(prev, localId, message));
+      revokePreview(payload.previewUrl);
+      pendingPayloadsRef.current.delete(localId);
     } catch (err) {
-      console.error("Chat media upload error:", err);
+      console.error("Chat media send error:", err);
+      markLocalFailed(
+        localId,
+        payload.contentType === "VOICE_NOTE"
+          ? "Couldn't send your voice note. Tap to retry."
+          : "Couldn't send your media. Tap to retry."
+      );
     }
   }
 
-  async function handleMediaUpload(e: React.ChangeEvent<HTMLInputElement>) {
+  function sendMedia(params: {
+    file?: File;
+    blob?: Blob;
+    fileName?: string;
+    contentType: "IMAGE" | "VIDEO" | "VOICE_NOTE";
+    durationSec?: number;
+  }) {
+    const source = params.file ?? params.blob;
+    if (!source) return;
+
+    const replyingToSnapshot = replyingTo;
+    setReplyingTo(null);
+
+    // Show the local file instantly, then swap for the hosted URL.
+    const previewUrl = URL.createObjectURL(source);
+    objectUrlsRef.current.add(previewUrl);
+
+    let fileName = params.fileName;
+    if (!fileName) {
+      const ext = source.type.includes("ogg")
+        ? ".ogg"
+        : source.type.includes("mp4")
+        ? ".m4a"
+        : ".webm";
+      fileName = `voice-note-${Date.now()}${ext}`;
+    }
+
+    const localId = createLocalId();
+    const optimisticMsg: ChatMessageItem = {
+      id: localId,
+      senderId: currentUserId,
+      contentType: params.contentType,
+      contentUrl: previewUrl,
+      localPreviewUrl: previewUrl,
+      durationSec: params.durationSec ?? null,
+      replyToId: replyingToSnapshot?.id || null,
+      replyTo: buildReplyPreview(replyingToSnapshot),
+      createdAt: new Date(),
+      sender: { id: currentUserId, displayName: "You" },
+      reactions: [],
+      localStatus: "sending",
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
+    setTimeout(() => scrollToBottom("smooth"), 50);
+
+    const payload: Extract<PendingPayload, { kind: "media" }> = {
+      kind: "media",
+      source,
+      fileName,
+      contentType: params.contentType,
+      durationSec: params.durationSec,
+      replyToId: replyingToSnapshot?.id || null,
+      previewUrl,
+    };
+    pendingPayloadsRef.current.set(localId, payload);
+
+    void uploadAndPostMedia(localId, payload);
+  }
+
+  async function retryMessage(msg: ChatMessageItem) {
+    const payload = pendingPayloadsRef.current.get(msg.id);
+    if (!payload) {
+      showToast("This message can't be retried. Please send it again.", "error");
+      return;
+    }
+
+    setMessages((prev) =>
+      prev.map((m) => (m.id === msg.id ? { ...m, localStatus: "sending" } : m))
+    );
+
+    if (payload.kind === "text") {
+      await postTextMessage(msg.id, payload.text, payload.replyToId || null);
+    } else {
+      await uploadAndPostMedia(msg.id, payload);
+    }
+  }
+
+  function uploadMediaFile(file: File) {
+    sendMedia({
+      file,
+      fileName: file.name,
+      contentType: file.type.startsWith("video/") ? "VIDEO" : "IMAGE",
+    });
+  }
+
+  function handleSendVoiceNote(blob: Blob, durationSec: number) {
+    sendMedia({ blob, contentType: "VOICE_NOTE", durationSec });
+  }
+
+  function handleMediaUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    await uploadMediaFile(file);
+    uploadMediaFile(file);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -437,6 +625,17 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
   }
 
   async function handleDeleteMessage(msg: ChatMessageItem) {
+    // Optimistic messages never reached the server – just drop them locally.
+    if (msg.localStatus === "sending" || msg.localStatus === "failed") {
+      setMessages((prev) => prev.filter((m) => m.id !== msg.id));
+      revokePreview(msg.localPreviewUrl);
+      pendingPayloadsRef.current.delete(msg.id);
+      if (replyingTo?.id === msg.id) setReplyingTo(null);
+      if (activeMediaModalMessage?.id === msg.id) setActiveMediaModalMessage(null);
+      setMessageToDelete(null);
+      return;
+    }
+
     setIsDeleting(true);
     const previousMessages = messages;
 
@@ -574,6 +773,7 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
                         audioUrl={msg.contentUrl}
                         durationSec={msg.durationSec}
                         isSentByMe={isMe}
+                        onError={(message) => showToast(message, "error")}
                       />
                     )}
 
@@ -615,24 +815,26 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
                           </div>
 
                           {/* 1-tap "Save to gallery" action button */}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleSaveToGallery(msg);
-                            }}
-                            className={`text-[10px] py-1 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition-colors ${
-                              isMe
-                                ? "bg-black/20 text-white/90 hover:bg-black/30"
-                                : "bg-white/[0.06] text-[#E5B268] hover:bg-white/10"
-                            }`}
-                          >
-                            <BookmarkPlus className="w-3 h-3" />
-                            <span>
-                              {savedToGalleryId === msg.id
-                                ? "Saved to Memories! 💛"
-                                : "Save to gallery"}
-                            </span>
-                          </button>
+                          {(!msg.localStatus || msg.localStatus === "sent") && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleSaveToGallery(msg);
+                              }}
+                              className={`text-[10px] py-1 px-2.5 rounded-lg flex items-center justify-center gap-1.5 transition-colors ${
+                                isMe
+                                  ? "bg-black/20 text-white/90 hover:bg-black/30"
+                                  : "bg-white/[0.06] text-[#E5B268] hover:bg-white/10"
+                              }`}
+                            >
+                              <BookmarkPlus className="w-3 h-3" />
+                              <span>
+                                {savedToGalleryId === msg.id
+                                  ? "Saved to Memories! 💛"
+                                  : "Save to gallery"}
+                              </span>
+                            </button>
+                          )}
                         </div>
                       )}
 
@@ -645,7 +847,11 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
                       <span>{format(new Date(msg.createdAt), "h:mm a")}</span>
                       {isMe && (
                         <span>
-                          {msg.readAt ? (
+                          {msg.localStatus === "sending" ? (
+                            <Loader2 className="w-3 h-3 text-white/80 animate-spin" />
+                          ) : msg.localStatus === "failed" ? (
+                            <AlertCircle className="w-3 h-3 text-amber-200" />
+                          ) : msg.readAt ? (
                             <CheckCheck className="w-3 h-3 text-white" />
                           ) : (
                             <Check className="w-3 h-3 text-white/75" />
@@ -682,6 +888,19 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
                     </button>
                   </div>
                 </div>
+
+                {/* Failed-to-send retry affordance */}
+                {isMe && msg.localStatus === "failed" && (
+                  <button
+                    type="button"
+                    onClick={() => retryMessage(msg)}
+                    className="flex items-center gap-1 mt-1 text-[10px] font-medium text-amber-300 hover:text-amber-200 transition-colors"
+                    title="Retry sending"
+                  >
+                    <AlertCircle className="w-3 h-3" />
+                    <span>Not sent · Tap to retry</span>
+                  </button>
+                )}
 
                 {/* Emoji Reaction Bar + Reply & Delete Actions (Popup on tap) */}
                 {activeReactionMessageId === msg.id && (
@@ -786,6 +1005,31 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
         </button>
       )}
 
+      {/* Subtle toast stack for send failures / playback errors */}
+      {toasts.length > 0 && (
+        <div className="absolute bottom-28 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 w-[90%] max-w-sm pointer-events-none">
+          {toasts.map((t) => (
+            <div
+              key={t.id}
+              className={`pointer-events-auto flex items-center gap-2 px-3.5 py-2 rounded-xl border text-xs shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-bottom-2 ${
+                t.variant === "error"
+                  ? "bg-[#2A1A1A]/95 border-rose-500/30 text-rose-100"
+                  : t.variant === "success"
+                  ? "bg-[#17231A]/95 border-emerald-500/30 text-emerald-100"
+                  : "bg-[#1A1824]/95 border-[#292536] text-[#F6F3EE]"
+              }`}
+            >
+              {t.variant === "error" ? (
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+              ) : (
+                <Info className="w-3.5 h-3.5 shrink-0" />
+              )}
+              <span>{t.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Input Bar Area */}
       <div className="p-3.5 md:py-4 bg-[#14121A]/95 border-t border-[#242031] backdrop-blur-md">
         {/* Replying banner preview */}
@@ -869,7 +1113,7 @@ export function ChatRoom({ initialMessages, currentUserId, partnerName }: ChatRo
           />
 
           {/* Voice recorder button */}
-          <VoiceRecorder onSendVoiceNote={handleSendVoiceNote} />
+          <VoiceRecorder onRecorded={handleSendVoiceNote} />
 
           {/* Text Input */}
           <input

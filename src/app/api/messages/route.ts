@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { listMessages, createMessage, markMessagesAsRead, deleteMessage } from "@/lib/db/messages";
+import {
+  listMessages,
+  createMessage,
+  markMessagesAsRead,
+  deleteMessage,
+  countUnreadFromSender,
+} from "@/lib/db/messages";
 import { ContentType } from "@prisma/client";
 import { sendPushToPartner } from "@/lib/push";
+import { sendMessageEmailToPartner } from "@/lib/email";
 import { isPartnerTyping, clearTyping } from "@/lib/typingTracker";
 
 export async function GET() {
@@ -34,6 +41,10 @@ export async function POST(req: NextRequest) {
     if (contentType === "VIDEO") validContentType = ContentType.VIDEO;
     if (contentType === "VOICE_NOTE") validContentType = ContentType.VOICE_NOTE;
 
+    // Count messages the partner hasn't read yet, before adding this one. Only
+    // the first message in a burst should trigger an email notification.
+    const priorUnreadCount = await countUnreadFromSender(user.coupleId, user.id);
+
     const message = await createMessage(user.coupleId, user.id, {
       contentType: validContentType,
       text,
@@ -58,6 +69,16 @@ export async function POST(req: NextRequest) {
       url: "/chat",
       tag: "ourloop-chat",
     }).catch((err) => console.error("Message push failed:", err));
+
+    // Non-blocking email notification to partner (only first message in a burst)
+    if (priorUnreadCount === 0) {
+      sendMessageEmailToPartner({
+        senderUserId: user.id,
+        coupleId: user.coupleId,
+        senderName,
+        preview: bodyPreview,
+      }).catch((err) => console.error("Message email failed:", err));
+    }
 
     return NextResponse.json({ message });
   } catch (error: any) {

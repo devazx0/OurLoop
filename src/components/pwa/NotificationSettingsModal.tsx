@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   isPushSupported,
   isIOS,
@@ -9,7 +9,7 @@ import {
   unsubscribeFromPush,
   triggerTestPush,
 } from "@/lib/pushClient";
-import { Bell, BellOff, Send, Smartphone, ShieldCheck, X, CheckCircle2, AlertCircle } from "lucide-react";
+import { Bell, BellOff, Send, Smartphone, ShieldCheck, X, CheckCircle2, AlertCircle, Mail } from "lucide-react";
 
 interface NotificationSettingsModalProps {
   isOpen: boolean;
@@ -32,6 +32,53 @@ export function NotificationSettingsModal({
   const [loading, setLoading] = useState(false);
   const [testStatus, setTestStatus] = useState<string | null>(null);
   const [testSuccess, setTestSuccess] = useState(false);
+
+  const [emailEnabled, setEmailEnabled] = useState<boolean | null>(null);
+  const [emailSaving, setEmailSaving] = useState(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+
+    fetch("/api/user/notifications")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data) {
+          setEmailEnabled(Boolean(data.emailNotificationsEnabled));
+          setEmailError(null);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
+  async function handleEmailToggle() {
+    if (emailEnabled === null || emailSaving) return;
+    const next = !emailEnabled;
+    setEmailSaving(true);
+    setEmailError(null);
+    setEmailEnabled(next); // optimistic update
+
+    try {
+      const res = await fetch("/api/user/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ emailNotificationsEnabled: next }),
+      });
+      if (!res.ok) throw new Error("Request failed");
+      const data = await res.json();
+      setEmailEnabled(Boolean(data.emailNotificationsEnabled));
+    } catch {
+      setEmailEnabled(!next); // revert on failure
+      setEmailError("Couldn't update email notifications. Please try again.");
+    } finally {
+      setEmailSaving(false);
+    }
+  }
 
   if (!isOpen) return null;
 
@@ -92,7 +139,7 @@ export function NotificationSettingsModal({
           </div>
           <div>
             <h3 className="text-base font-semibold text-[#F6F3EE]">
-              Push Notifications
+              Notifications
             </h3>
             <p className="text-xs text-[#A6A0B8]">
               Stay connected with {partnerName} in real-time
@@ -166,6 +213,45 @@ export function NotificationSettingsModal({
             <p className="leading-relaxed">{testStatus}</p>
           </div>
         )}
+
+        {/* Email Notifications */}
+        <div className="mt-5 pt-5 border-t border-[#231E33]">
+          <div className="flex items-center justify-between gap-3 p-3 rounded-2xl bg-[#0E0D13] border border-[#231E33]">
+            <div className="flex items-center gap-2 min-w-0">
+              <Mail className="w-4 h-4 text-[#E5B268] shrink-0" />
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-[#F6F3EE]">
+                  Email Notifications
+                </p>
+                <p className="text-[10px] text-[#9992A8] leading-tight mt-0.5">
+                  Email me when {partnerName} sends a message
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={emailEnabled ?? false}
+              aria-label="Toggle email notifications"
+              onClick={handleEmailToggle}
+              disabled={emailEnabled === null || emailSaving}
+              className={`relative w-11 h-6 rounded-full shrink-0 transition-colors disabled:opacity-50 ${
+                emailEnabled
+                  ? "bg-gradient-to-r from-[#E26D54] to-[#E5B268]"
+                  : "bg-[#2D283E]"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-[#F6F3EE] shadow transition-transform ${
+                  emailEnabled ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+          {emailError && (
+            <p className="mt-2 text-[11px] text-rose-400">{emailError}</p>
+          )}
+        </div>
 
         {/* Actions */}
         <div className="space-y-2.5">

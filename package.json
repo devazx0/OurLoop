@@ -3,10 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 6003",
-    "build": "prisma generate && next build",
+    "dev": "node api.js && next dev -p 6003",
+    "build": "node api.js && prisma generate && node scripts/migrate-deploy.mjs && next build",
     "postinstall": "prisma generate",
-    "start": "next start",
+    "start": "node api.js && next start",
     "lint": "eslint"
   },
   "dependencies": {
@@ -21,6 +21,7 @@
     "next": "16.3.4",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "resend": "^6.33.0",
     "resize-observer-polyfill": "^1.5.1",
     "web-push": "^3.6.7"
   },

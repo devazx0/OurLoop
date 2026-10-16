@@ -1,0 +1,18 @@
+# Never upload local environment files (secrets) to Vercel.
+.env
+.env.*
+!.env.example
+
+# Local build artifacts and caches
+.next
+out
+build
+coverage
+tsconfig.tsbuildinfo
+next-env.d.ts
+
+# Vercel CLI local state
+.vercel
+
+# Local uploaded media
+public/uploads

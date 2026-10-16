@@ -184,6 +184,20 @@ export async function getUnreadCount(coupleId: string, currentUserId: string) {
   });
 }
 
+/**
+ * Count messages sent by a given user that the partner has not read yet.
+ * Used to send at most one email notification per burst of messages.
+ */
+export async function countUnreadFromSender(coupleId: string, senderId: string) {
+  return prisma.message.count({
+    where: {
+      coupleId,
+      senderId,
+      readAt: null,
+    },
+  });
+}
+
 export async function deleteMessage(coupleId: string, messageId: string) {
   const message = await prisma.message.findFirst({
     where: {

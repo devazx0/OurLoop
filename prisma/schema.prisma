@@ -11,14 +11,16 @@ datasource db {
 }
 
 model User {
-  id           String   @id @default(uuid())
-  email        String   @unique
-  passwordHash String?
-  displayName  String
-  avatarUrl    String?
-  nickname     String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id                       String    @id @default(uuid())
+  email                    String    @unique
+  passwordHash             String?
+  displayName              String
+  avatarUrl                String?
+  nickname                 String?
+  emailNotificationsEnabled Boolean  @default(true)
+  lastMessageEmailAt       DateTime?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
 
   memberships  CoupleMember[]
   memories     Memory[]
